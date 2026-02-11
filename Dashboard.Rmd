@@ -1,0 +1,2184 @@
+---
+title: "Análisis del Empleo Juvenil (Proyecto: Yone Suárez Viera)"
+output:
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    vertical_layout: fill
+runtime: shiny
+---
+```{css}
+
+/* Reducir tamaño de las pestañas/tabs */
+.navbar-nav > li > a {
+  padding-top: 10px !important;   /* Original: 15px */
+  padding-bottom: 10px !important;
+  font-size: 13px !important;      /* Original: 14px */
+  line-height: 1.3 !important;
+}
+
+
+
+
+
+/* Agregar padding al top de los sidebars */
+.section.sidebar {
+  padding-top: 40px !important;
+}
+
+/* Asegurar que los títulos h3 en sidebar tengan espacio */
+.sidebar h3 {
+  margin-top: 15px !important;
+  padding-top: 15px !important;
+}
+```
+```{r global, include=FALSE}
+# --- 1. CARGA DE LIBRERÍAS (combinadas de todos tus ficheros) ---
+library(flexdashboard)
+library(shiny)
+library(tidyverse)
+library(ggplot2)
+library(plotly)
+library(leaflet)
+library(geojsonio)
+library(RColorBrewer)
+library(openxlsx)
+library(fpp3)      # Para modelado de series temporales (ARIMA)
+library(pxR)       # Para leer datos del ISTAC (.px)
+# library(ggridges)  # <-- ELIMINADA POR PETICIÓN
+library(stringr)   # Para str_trim
+library(DT)
+library(zoo)
+
+
+# --- ¡NUEVA LIBRERÍA AÑADIDA DE TU PETICIÓN! ---
+if (!require(highcharter)) install.packages('highcharter')
+library(highcharter)
+
+
+# --- 3. CARGA Y LIMPIEZA DE DATOS (de tu memoria de proyecto) ---
+
+# Carga de datos principales de Eurostat
+yth <- read_csv("yth_empl_010.csv") %>% tibble::as_tibble()
+
+# Limpieza principal (yth_clean_improved)
+yth_clean_improved <- yth %>%
+  dplyr::filter(
+    !is.na(OBS_VALUE),
+    OBS_VALUE <= 100,
+    !OBS_FLAG %in% c("u", "bu", "bdu"),
+    !isced11 %in% c("No response", "All ISCED 2011 levels")
+  ) %>%
+  dplyr::mutate(
+    nivel_educ = case_when(
+      str_detect(isced11, "levels 0-2") ~ "Básica",
+      str_detect(isced11, "levels 3 and 4") & str_detect(isced11, "general") ~ "Secundaria General",
+      str_detect(isced11, "levels 3 and 4") & str_detect(isced11, "vocational") ~ "Secundaria Vocacional",
+      str_detect(isced11, "levels 3 and 4") ~ "Secundaria",
+      str_detect(isced11, "levels 5-8") ~ "Superior",
+      TRUE ~ "Otros"
+    ),
+    sexo = dplyr::case_when(
+      sex == "Males" ~ "Hombres",
+      sex == "Females" ~ "Mujeres", 
+      sex == "Total" ~ "Total",
+      TRUE ~ sex
+    ),
+    pais = dplyr::case_when(
+      geo == "Spain" ~ "España",
+      geo == "France" ~ "Francia",
+      geo == "Germany" ~ "Alemania",
+      geo == "Italy" ~ "Italia",
+      geo == "Portugal" ~ "Portugal",
+      geo == "Netherlands" ~ "Países Bajos",
+      geo == "Sweden" ~ "Suecia",
+      geo == "Greece" ~ "Grecia",
+      geo == "Austria" ~ "Austria",
+      geo == "Belgium" ~ "Bélgica",
+      geo == "Denmark" ~ "Dinamarca",
+      geo == "Finland" ~ "Finlandia",
+      geo == "Ireland" ~ "Irlanda",
+      geo == "Luxembourg" ~ "Luxemburgo",
+      geo == "Norway" ~ "Noruega",
+      geo == "Switzerland" ~ "Suiza",
+      geo == "United Kingdom" ~ "Reino Unido",
+      geo == "Poland" ~ "Polonia",
+      geo == "Czech Republic" ~ "República Checa",
+      geo == "Hungary" ~ "Hungría",
+      geo == "Romania" ~ "Rumanía",
+      geo == "Bulgaria" ~ "Bulgaria",
+      geo == "Croatia" ~ "Croacia",
+      geo == "Slovakia" ~ "Eslovaquia",
+      geo == "Slovenia" ~ "Eslovenia",
+      geo == "Estonia" ~ "Estonia",
+      geo == "Latvia" ~ "Letonia",
+      geo == "Lithuania" ~ "Lituania",
+      geo == "Cyprus" ~ "Chipre",
+      geo == "Malta" ~ "Malta",
+      TRUE ~ geo
+    ),
+    edad = dplyr::case_when(
+      age == "From 15 to 19 years" ~ "De 15 a 19 años",
+      age == "From 20 to 24 years" ~ "De 20 a 24 años",
+      age == "From 25 to 29 years" ~ "De 25 a 29 años",
+      age == "From 15 to 24 years" ~ "De 15 a 24 años",
+      age == "From 15 to 29 years" ~ "De 15 a 29 años",
+      age == "From 20 to 29 years" ~ "De 20 a 29 años",
+      age == "From 25 to 34 years" ~ "De 25 a 34 años",
+      age == "From 30 to 34 years" ~ "De 30 a 34 años",
+      TRUE ~ age
+    )
+  ) %>%
+  dplyr::filter(nivel_educ != "Otros") %>%
+  dplyr::select(
+    geo, 
+    pais, año = TIME_PERIOD, sexo, edad,
+    nivel_educ, tasa_empleo = OBS_VALUE, flag_calidad = OBS_FLAG
+  ) %>%
+  dplyr::mutate(
+    año = as.integer(año),
+    tasa_empleo = as.numeric(tasa_empleo) # <-- ¡CAMBIO CLAVE!
+  )
+
+# --- ¡NUEVO! Diccionario para arreglar el mapa ---
+# Mapea los nombres en inglés de la columna 'geo' a los códigos 'NUTS_ID' del mapa
+geo_to_nuts <- c(
+  "Spain" = "ES", "France" = "FR", "Germany" = "DE", "Italy" = "IT", 
+  "Portugal" = "PT", "Netherlands" = "NL", "Sweden" = "SE", "Greece" = "EL", 
+  "Austria" = "AT", "Belgium" = "BE", "Denmark" = "DK", "Finland" = "FI", 
+  "Ireland" = "IE", "Luxembourg" = "LU", "Norway" = "NO", "Switzerland" = "CH",
+  "United Kingdom" = "UK", "Poland" = "PL", "Czech Republic" = "CZ", 
+  "Hungary" = "HU", "Romania" = "RO", "Bulgaria" = "BG", "Croatia" = "HR", 
+  "Slovakia" = "SK", "Slovenia" = "SI", "Estonia" = "EE", "Latvia" = "LV", 
+  "Lithuania" = "LT", "Cyprus" = "CY", "Malta" = "MT"
+)
+
+# Lista de países para comparaciones
+# --- CAMBIO: Coger TODOS los países disponibles en los datos ---
+paises_comparacion <- unique(yth_clean_improved$pais)
+
+# Añadir grupo regional (para boxplots)
+yth_clean_improved <- yth_clean_improved %>%
+ dplyr::mutate(
+    grupo_region = dplyr::case_when(
+      pais %in% c("España", "Italia", "Portugal", "Grecia") ~ "Sur Europa",
+      pais %in% c("Alemania", "Países Bajos", "Suecia", "Finlandia", "Dinamarca", "Noruega") ~ "Norte Europa",
+      pais %in% c("Francia", "Bélgica", "Austria", "Irlanda", "Luxemburgo") ~ "Europa Occidental",
+      TRUE ~ "Otros"
+    )
+  )
+
+# Resumen comparativo (para gráficos de España)
+resumen_comparativo <- yth_clean_improved %>%
+  dplyr::filter(pais %in% paises_comparacion,
+         sexo == "Total",
+         edad == "De 15 a 29 años") %>%
+  dplyr::group_by(pais, año, nivel_educ) %>%
+  dplyr::summarise(
+    tasa_promedio = mean(tasa_empleo, na.rm = TRUE),
+    n_registros = n(),
+    .groups = 'drop'
+  )
+
+# --- 4. CARGA DE DATOS GEOGRÁFICOS (de Dashboard2.Rmd) ---
+geoj <- geojson_read('mapa_paises.geojson',  what = "sp")
+# ¡FIX! Limpiamos espacios en blanco de la columna NUTS_ID por si acaso
+geoj.tb <- geoj %>% tibble::as_tibble() %>% dplyr::mutate(NUTS_ID = str_trim(NUTS_ID))
+
+# Función MapaCoroplético (de Dashboard2.Rmd y utilidades.R)
+MapaCoroplético <- function(geoj,value,region_labels,legend_title){
+pal <- colorQuantile("YlOrRd", value, n = 9, na.color = "#f5f5f5") # Añadido na.color
+p <-  geoj %>%
+    leaflet() %>%  
+    setView(lng = 15, lat = 48, zoom = 4)  %>% # Centrado mejor en Europa
+    addPolygons(
+      fillColor = pal(value), 
+      weight = 1, # Más fino
+      opacity = 1,
+      color = "white",
+      dashArray = "3",
+      fillOpacity = 0.7,
+      highlightOptions = highlightOptions(  
+        weight = 2,
+        color = rgb(0.2,0.2,0.2),
+        dashArray = "",
+        fillOpacity = 0.7,
+        bringToFront = TRUE
+      ),
+      label = region_labels  
+    ) %>%  
+    addLegend("bottomleft",  
+      pal = pal,  
+      values = value,
+      title = legend_title,
+      labFormat = function(type, cuts, p) {
+        n = length(cuts) 
+        x = (cuts[-n] + cuts[-1])/2
+        x=prettyNum(round(x,
+          digits=max(5-nchar(as.character(round(max(na.omit(value))))),0)), 
+          big.mark = ","
+        )
+        as.character(x)
+      },
+      opacity = 1
+    )
+  return(p)
+}
+
+
+# --- 5. CARGA DE DATOS ISTAC (Canarias) (de tu memoria) ---
+df_istac <- read.px("dataset-ISTAC-E30308B_000002-1_3.px") %>% tibble::as_tibble()
+
+df_istac <- df_istac %>%
+  dplyr::mutate(dplyr::across(dplyr::where(is.character), ~ iconv(.x, from = "latin1", to = "UTF-8")))
+
+# Limpieza ISTAC: Canarias vs España
+canarias_anual <- df_istac %>%
+  dplyr::filter(
+    Indicador == "Tasa de empleo",
+    Edad == "Menor de 25 años",
+    Sexo == "Total",
+    Territorio == "Canarias"
+  ) %>%
+  dplyr::mutate(año = as.integer(substr(Periodo, 1, 4))) %>%
+  dplyr::group_by(año) %>%
+  dplyr::summarise(tasa_empleo = mean(value, na.rm = TRUE)) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(ambito = "Canarias (<25 años)")
+
+espana_anual <- yth_clean_improved %>%
+  dplyr::filter(pais == "España", sexo == "Total", edad == "De 15 a 24 años") %>%
+  dplyr::mutate(año = as.integer(año)) %>%
+  dplyr::group_by(año) %>%
+  dplyr::summarise(tasa_empleo = mean(tasa_empleo, na.rm = TRUE)) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(ambito = "España (15-24 años)")
+
+
+datos_comparativos_can <- dplyr::bind_rows(canarias_anual, espana_anual) %>% 
+  dplyr::filter(!is.na(tasa_empleo))   
+
+
+# Limpieza ISTAC: Por Islas
+islas_anual <- df_istac %>%
+  dplyr::filter(
+    Indicador == "Tasa de empleo",
+    Edad == "Menor de 25 años",
+    Sexo == "Total",
+    Territorio != "Canarias"
+  ) %>%
+  dplyr::mutate(año = as.integer(substr(Periodo, 1, 4))) %>%
+  dplyr::group_by(Territorio, año) %>%
+  dplyr::summarise(tasa_empleo = mean(value, na.rm = TRUE), .groups = 'drop') %>%
+  dplyr::mutate(Territorio = reorder(Territorio, -tasa_empleo, FUN = mean))
+
+# Limpieza ISTAC: Mapa de Paro
+paro_islas <- df_istac %>%
+  dplyr::filter(         
+    Indicador == "Tasa de paro",
+    Edad == "Menor de 25 años",
+    Sexo == "Total",
+    Territorio != "Canarias"
+  ) %>%
+  dplyr::group_by(Territorio) %>%    
+  dplyr::filter(Periodo == dplyr::first(Periodo)) %>% # <-- CAMBIO x2
+  dplyr::select(isla = Territorio, tasa_paro = value) # <-- CAMBIO
+
+islas_info <- tibble::tribble(         
+  ~isla,         ~latitud, ~longitud, ~superficie,
+  "El Hierro",     27.74,   -18.03,    268.7,
+  "La Palma",      28.66,   -17.86,    708.3,
+  "La Gomera",     28.11,   -17.22,    369.8,
+  "Tenerife",      28.29,   -16.63,    2034.4,
+  "Gran Canaria",  27.96,   -15.59,    1560.1,
+  "Fuerteventura", 28.36,   -14.02,    1659.7,
+  "Lanzarote",     29.04,   -13.59,    845.9
+)
+datos_mapa_canarias <- dplyr::left_join(islas_info, paro_islas, by = "isla") %>% 
+  dplyr::filter(!is.na(tasa_paro))     
+
+
+# --- 6. MODELADO ARIMA (Pre-calculado de tu memoria) ---
+
+# Modelo España
+espana_superior_ts <- resumen_comparativo %>%
+  dplyr::filter(pais == "España", nivel_educ == "Superior") %>% 
+  dplyr::mutate(año = as.integer(año)) %>% 
+  tsibble::as_tsibble(index = año)     
+
+modelo_arima_esp <- espana_superior_ts %>%
+  model(ARIMA = ARIMA(tasa_promedio)) 
+predicciones_esp <- forecast(modelo_arima_esp, h = 5) 
+intervalos_esp <- predicciones_esp %>%
+  hilo(level = c(80, 95)) %>%    
+  unpack_hilo(c(`80%`, `95%`)) 
+
+# Modelo Canarias
+# --- Modelo Canarias (MODIFICADO) ---
+canarias_islas_ts <- df_istac %>%
+  dplyr::filter(
+    Indicador == "Tasa de empleo",
+    Edad == "Menor de 25 años",
+    Sexo == "Total"
+  ) %>%
+  dplyr::mutate(
+    trimestre = tsibble::yearquarter(paste(substr(Periodo, 1, 4),
+                                           dplyr::case_when(
+                                             grepl("Primer", Periodo) ~ "Q1",
+                                             grepl("Segundo", Periodo) ~ "Q2",
+                                             grepl("Tercer", Periodo) ~ "Q3",
+                                             grepl("Cuarto", Periodo) ~ "Q4"
+                                           )))
+  ) %>%
+  tsibble::as_tsibble(index = trimestre, key = Territorio) %>% 
+  dplyr::select(Territorio, trimestre, tasa_empleo = value)  
+
+opciones_islas_can <- unique(canarias_islas_ts$Territorio)
+
+canarias_trimestral_ts <- canarias_islas_ts %>%
+  dplyr::filter(Territorio == "Canarias") 
+
+modelo_arima_can <- canarias_trimestral_ts %>%
+  model(ARIMA = ARIMA(tasa_empleo)) 
+predicciones_can <- forecast(modelo_arima_can, h = "2 years") 
+intervalos_can <- predicciones_can %>%
+  hilo(level = c(80, 95)) %>%    
+  unpack_hilo(c(`80%`, `95%`)) 
+
+opciones_obj_can <- unique(canarias_islas_ts$trimestre) 
+opciones_indices_can <- seq(1, length(opciones_obj_can), 4)
+opciones_lista_can <- opciones_indices_can
+names(opciones_lista_can) <- as.character(opciones_obj_can[opciones_indices_can])
+selected_indice_can <- 1
+```
+
+# Mapa y Series {data-icon="fa-map"}
+
+## Column {.sidebar data-width=250}
+
+### Controles de Visualización
+```{r}
+
+# --- FIX VISUAL: Ajustar márgenes superiores ---
+# Esto reduce el espacio en blanco al principio de la barra lateral
+shiny::tags$style(HTML("
+  .section.sidebar {
+    padding-top: 10px !important; /* Originalmente era 40px */
+  }
+  .sidebar h3 {
+    margin-top: 0px !important;
+    padding-top: 10px !important; 
+    margin-bottom: 10px !important;
+  }
+"))
+
+
+shiny::selectInput( 
+  "edad_select",
+  label = "Seleccionar Grupo de Edad:",
+  choices = unique(yth_clean_improved$edad),
+  selected = "De 15 a 29 años",
+  multiple = FALSE
+)
+
+# --- CAMBIO AQUÍ: AÑADIDA OPCIÓN DE COMPARATIVA ---
+shiny::selectInput( 
+  "sexo_select",
+  label = "Seleccionar Sexo:",
+  # Añadimos la opción especial al final
+  choices = c("Total", "Hombres", "Mujeres", "Comparativa: Hombres vs Mujeres"),   
+  selected = "Total",
+  multiple = FALSE
+) 
+
+shiny::selectInput( 
+  "educ_select",
+  label = "Seleccionar Nivel Educativo:",
+  choices = unique(yth_clean_improved$nivel_educ),
+  selected = "Superior",
+  multiple = FALSE
+)
+
+shiny::sliderInput( 
+  "año_select",
+  label = "Seleccionar Rango de Años:",
+  min = min(yth_clean_improved$año, na.rm = TRUE),
+  max = max(yth_clean_improved$año, na.rm = TRUE),
+  value = c(2000, max(yth_clean_improved$año, na.rm = TRUE)),
+  sep = ""
+)
+```
+```{r}
+# --- INICIO: LÓGICA DE FILTROS DINÁMICOS ---
+
+# 1. Crear dataframe ligero
+filter_data_distinct <- yth_clean_improved %>%
+  dplyr::select(edad, sexo, nivel_educ) %>%
+  dplyr::distinct()
+
+# Función auxiliar para determinar qué sexos filtrar
+obtener_sexos_filtro <- function(input_sexo) {
+  if (input_sexo == "Comparativa: Hombres vs Mujeres") {
+    return(c("Hombres", "Mujeres"))
+  } else {
+    return(input_sexo)
+  }
+}
+
+# 2. Observador para 'Grupo de Edad'
+shiny::observeEvent(input$edad_select, {
+  req(input$sexo_select) 
+  
+  sexos_actuales <- obtener_sexos_filtro(input$sexo_select)
+
+  available_educ_levels <- filter_data_distinct %>%
+    dplyr::filter(
+      edad == input$edad_select,
+      sexo %in% sexos_actuales # Usamos %in% para soportar varios
+    ) %>%
+    dplyr::pull(nivel_educ) %>%
+    unique() %>%
+    sort()
+
+  current_selection <- input$educ_select
+  shiny::updateSelectInput(
+    session, "educ_select",
+    choices = available_educ_levels,
+    selected = if (current_selection %in% available_educ_levels) current_selection else available_educ_levels[1]
+  )
+})
+
+# 3. Observador para 'Sexo'
+shiny::observeEvent(input$sexo_select, {
+  req(input$edad_select) 
+  
+  sexos_actuales <- obtener_sexos_filtro(input$sexo_select)
+
+  available_educ_levels <- filter_data_distinct %>%
+    dplyr::filter(
+      sexo %in% sexos_actuales, # Usamos %in%
+      edad == input$edad_select
+    ) %>%
+    dplyr::pull(nivel_educ) %>%
+    unique() %>%
+    sort()
+
+  current_selection <- input$educ_select
+  shiny::updateSelectInput(
+    session, "educ_select",
+    choices = available_educ_levels,
+    selected = if (current_selection %in% available_educ_levels) current_selection else available_educ_levels[1]
+  )
+})
+# --- FIN LÓGICA FILTROS ---
+
+
+# --- DATOS REACTIVOS ---
+datos_filtrados <- shiny::reactive({ 
+  yth_clean_improved %>%
+    dplyr::filter( 
+      año >= input$año_select[1] & año <= input$año_select[2]
+    )
+})
+
+# Datos específicos para el MAPA y la TABLA
+# NOTA: El mapa es estático (una foto), no puede mostrar dos líneas. 
+# Si eligen comparativa, mostraremos el promedio de ambos para el color del mapa.
+datos_mapa <- shiny::reactive({ 
+  
+  sexos_filtro <- obtener_sexos_filtro(input$sexo_select)
+  
+  yth_clean_improved %>%
+    dplyr::filter( 
+      edad == input$edad_select,
+      nivel_educ == input$educ_select,
+      sexo %in% sexos_filtro,  # Filtramos uno o los dos
+      año >= input$año_select[1] & año <= input$año_select[2]
+    ) %>%
+    dplyr::group_by(pais, geo) %>%  
+    # Si hay dos sexos, el mean() hará el promedio de hombres y mujeres para el mapa
+    dplyr::summarise(tasa_promedio = mean(tasa_empleo, na.rm = TRUE), .groups = 'drop') %>% 
+    dplyr::mutate(NUTS_ID = geo_to_nuts[geo]) 
+})
+
+output$tabla_mapa <- DT::renderDataTable({
+  datos <- datos_mapa() %>%
+    dplyr::select(Pais = pais, "Tasa Empleo (%)" = tasa_promedio) %>% 
+    dplyr::arrange(dplyr::desc(`Tasa Empleo (%)`)) 
+
+  DT::datatable( 
+    datos,
+    options = list(scrollY = "300px", paging = FALSE, dom = 't', lengthChange = FALSE, searching = FALSE, info = FALSE),
+    rownames = FALSE
+  ) %>% DT::formatRound(columns = "Tasa Empleo (%)", digits = 1) 
+})
+```
+```{r}
+shiny::h5("Datos Promedio del Mapa") 
+DT::dataTableOutput("tabla_mapa")
+```
+
+## Column {.tabset}
+
+### Europa
+```{r}
+leaflet::renderLeaflet({
+  tb <- datos_mapa()
+ 
+  join <- geoj.tb %>% 
+    dplyr::left_join(tb, by = "NUTS_ID") 
+ 
+  etiquetas <- paste(
+    "<strong> ", ifelse(is.na(join$pais), join$NAME_LATN, join$pais) ,
+    "</strong><br>", input$educ_select, " (", input$edad_select, ")",
+    "<br>", input$sexo_select, 
+    ": ", 
+    ifelse(is.na(join$tasa_promedio), "Sin datos", 
+           paste0(prettyNum(round(join$tasa_promedio, digits = 2), big.mark = ",", scientific = FALSE), "%"))
+  )  %>%
+    lapply(htmltools::HTML)
+ 
+  MapaCoroplético(geoj, join$tasa_promedio, etiquetas, "Tasa Empleo (%)")
+})
+```
+
+
+### Series Temporales Detalladas
+
+```{r}
+# --- 1. Definimos la UI de Paginación (asignada a un output) ---
+output$ui_paginacion <- renderUI({
+  req(datos_filtrados())
+  
+  df_base <- datos_filtrados()
+  modo_comparativa <- (input$sexo_select == "Comparativa: Hombres vs Mujeres")
+  sexos_a_filtrar <- if (modo_comparativa) c("Hombres", "Mujeres") else input$sexo_select
+  
+  df_temp <- df_base %>%
+    dplyr::filter(
+      edad == input$edad_select,
+      sexo %in% sexos_a_filtrar,
+      nivel_educ == input$educ_select
+    )
+  
+  num_paises <- length(unique(df_temp$pais))
+  num_paginas <- ceiling(num_paises / 9)  # 9 gráficos por página (3x3)
+  
+  if (num_paginas > 1) {
+    div(
+      style = "display: flex; align-items: center; gap: 10px; margin-bottom: 5px; padding: 5px;",
+      tags$label("Página:", style = "margin: 0; font-weight: bold;"),
+      numericInput(
+        "pagina_series",
+        label = NULL,
+        value = 1,
+        min = 1,
+        max = num_paginas,
+        step = 1,
+        width = "80px"
+      ),
+      tags$span(paste("de", num_paginas), style = "color: #666;")
+    )
+  } else {
+    div(style = "height: 10px;") # Espaciador si no hay paginación
+  }
+})
+
+# --- 2. Definimos el Gráfico (asignado a un output) ---
+output$plot_series <- renderPlotly({
+  req(datos_filtrados(), input$edad_select, input$sexo_select, input$educ_select)
+  
+  df_base <- datos_filtrados()
+  
+  # Lógica para determinar si estamos comparando
+  modo_comparativa <- (input$sexo_select == "Comparativa: Hombres vs Mujeres")
+  
+  # Definimos qué sexos vamos a filtrar
+  sexos_a_filtrar <- if (modo_comparativa) c("Hombres", "Mujeres") else input$sexo_select
+
+  # Filtramos los datos
+  df_series <- df_base %>%
+    dplyr::filter(
+      edad == input$edad_select,
+      sexo %in% sexos_a_filtrar,
+      nivel_educ == input$educ_select
+    ) %>%
+    # Agrupamos también por SEXO ahora
+    dplyr::group_by(pais, año, sexo) %>%
+    dplyr::summarise(tasa_empleo_media = mean(tasa_empleo, na.rm = TRUE), .groups = 'drop')
+
+  # Validación de datos
+  if (nrow(df_series) == 0) {
+    return(plotly::plot_ly() %>% plotly::layout(title = "Sin Datos con los filtros actuales"))
+  }
+  
+  # --- ORDENAR PAÍSES ---
+  paises_unicos <- unique(df_series$pais)
+  españa_nombres <- c("Spain", "España", "SPAIN", "ESPAÑA")
+  españa_encontrada <- paises_unicos[paises_unicos %in% españa_nombres]
+  
+  if (length(españa_encontrada) > 0) {
+    españa_encontrada <- españa_encontrada[1]
+    otros_paises <- sort(paises_unicos[!paises_unicos %in% españa_nombres])
+    orden_paises <- c(españa_encontrada, otros_paises)
+  } else {
+    orden_paises <- sort(paises_unicos)
+  }
+  
+  # --- PAGINACIÓN ---
+  paises_por_pagina <- 9  # 3 columnas x 3 filas
+  # Asegurar que input$pagina_series existe, si no, usar 1
+  pagina_actual <- if (!is.null(input$pagina_series)) input$pagina_series else 1
+  
+  inicio <- (pagina_actual - 1) * paises_por_pagina + 1
+  fin <- min(pagina_actual * paises_por_pagina, length(orden_paises))
+  
+  # Validación de seguridad por si cambian los filtros y la página queda fuera de rango
+  if (inicio > length(orden_paises)) {
+     inicio <- 1
+     fin <- min(paises_por_pagina, length(orden_paises))
+  }
+
+  paises_pagina <- orden_paises[inicio:fin]
+  
+  # Filtrar datos solo para los países de esta página
+  df_series_pagina <- df_series %>%
+    dplyr::filter(pais %in% paises_pagina) %>%
+    dplyr::mutate(pais = factor(pais, levels = paises_pagina))
+  
+  # --- CONSTRUCCIÓN DEL GRÁFICO ---
+  p <- ggplot(df_series_pagina, aes(x = año, y = tasa_empleo_media))
+  
+  if (modo_comparativa) {
+    p <- p + 
+      geom_line(aes(color = sexo, group = interaction(pais, sexo)), linewidth = 0.8) +
+      scale_color_manual(values = c("Hombres" = "#0072B2", "Mujeres" = "#D55E00")) +
+      aes(text = paste("<b>País:</b>", pais,
+                       "<br><b>Sexo:</b>", sexo,
+                       "<br><b>Año:</b>", año,
+                       "<br><b>Tasa:</b>", round(tasa_empleo_media, 1), "%"))
+  } else {
+    p <- p + 
+      geom_line(color = "#0072B2", linewidth = 0.8, aes(group = pais)) +
+      aes(text = paste("<b>País:</b>", pais,
+                       "<br><b>Año:</b>", año,
+                       "<br><b>Tasa:</b>", round(tasa_empleo_media, 1), "%"))
+  }
+
+  titulo_texto <- if (length(orden_paises) > 9) {
+    num_total_pag <- ceiling(length(orden_paises) / 9)
+    # Validar visualización del número de página
+    pag_vis <- if(pagina_actual > num_total_pag) 1 else pagina_actual
+    paste("Evolución Temporal - Pág", pag_vis, "de", num_total_pag)
+  } else {
+    "Evolución Temporal por País"
+  }
+
+  p <- p +
+    facet_wrap(~ pais, ncol = 3, scales = "free_y") + 
+    labs(
+      title = titulo_texto,
+      x = "", # Quitamos etiqueta X para limpiar
+      y = "Tasa (%)"
+    ) +
+    theme_minimal(base_size = 11) + 
+    theme(
+      legend.position = "bottom",
+      strip.text = element_text(face = "bold", size = 10)
+    )
+    
+  plotly::ggplotly(p, tooltip = "text") %>%
+    plotly::layout(legend = list(orientation = "h", x = 0.4, y = -0.2))
+})
+
+# --- 3. Renderizado FINAL con Layout Controlado ---
+# Usamos fillCol para dividir el espacio vertical:
+# NA: El primer elemento (UI) toma su altura natural.
+# 1: El segundo elemento (Plot) toma todo el espacio restante (height="100%").
+shiny::fillCol(flex = c(NA, 1),
+  shiny::uiOutput("ui_paginacion"),
+  plotly::plotlyOutput("plot_series", height = "100%")
+)
+```
+
+
+
+
+# Visión General {data-icon="fa-eye"}
+
+## Column
+
+### Empleo por Región Geográfica
+```{r}
+plotly::renderPlotly({
+  # Obtener sexos a filtrar
+  sexos_filtro <- obtener_sexos_filtro(input$sexo_select)
+  
+  df_region <- datos_filtrados() %>%
+    dplyr::filter( 
+      edad == input$edad_select,
+      nivel_educ == input$educ_select,
+      sexo %in% sexos_filtro, 
+      grupo_region != "Otros"
+    )
+
+  p <- ggplot(df_region, aes(x = grupo_region, y = tasa_empleo, fill = grupo_region)) +
+    geom_boxplot(alpha = 0.8, show.legend = FALSE) +
+    labs(
+      title = paste("Distribución por Región |", input$sexo_select), 
+      subtitle = "Punto rojo indica la media",
+      x = "Región Europea",
+      y = "Tasa de empleo (%)"
+    ) +
+    theme_minimal()
+ 
+  ggplotly(p)
+})
+```
+
+## Column
+
+### Empleo por Grupo de Edad
+```{r}
+plotly::renderPlotly({
+  # Obtener sexos a filtrar
+  sexos_filtro <- obtener_sexos_filtro(input$sexo_select)
+
+  df_edad <- datos_filtrados() %>%
+    filter(
+      nivel_educ == input$educ_select,
+      sexo %in% sexos_filtro, 
+      edad %in% c("De 15 a 19 años", "De 20 a 24 años", "De 25 a 29 años")
+    )
+
+  p <- ggplot(df_edad, aes(x = edad, y = tasa_empleo, fill = edad)) +
+    geom_boxplot(alpha = 0.8, show.legend = FALSE) +
+    labs(
+      title = paste("Distribución por Grupo de Edad |", input$sexo_select), 
+      subtitle = "Punto rojo indica la media",
+      x = "Grupo de edad",
+      y = "Tasa de empleo (%)"
+    ) +
+    theme_minimal()
+
+  ggplotly(p)
+})
+```
+
+# Análisis de Factores {data-icon="fa-chart-bar"}
+
+## Column
+
+### Evolución Brecha de Género
+```{r}
+plotly::renderPlotly({
+ 
+  df_genero <- datos_filtrados() %>%
+    dplyr::filter( 
+      sexo %in% c("Hombres", "Mujeres"),  
+      edad == input$edad_select,
+      nivel_educ == input$educ_select
+    ) %>%
+    dplyr::group_by(sexo, año) %>% 
+    dplyr::summarise(tasa_promedio = mean(tasa_empleo, na.rm = TRUE), .groups = 'drop') 
+     
+  p <- ggplot(df_genero, aes(x = año, y = tasa_promedio, color = sexo, group = sexo)) +
+    geom_line(linewidth = 1, alpha = 0.8) +
+    geom_point(size = 1.5, alpha = 0.6) +
+    scale_color_manual(values = c("Mujeres" = "#E74C3C", "Hombres" = "#3498DB")) +
+    labs(
+      title = "Evolución de la Brecha de Género",
+      subtitle = paste(input$edad_select, "|", input$educ_select),
+      x = "Año",
+      y = "Tasa de empleo (%)",
+      color = "Sexo"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+
+  plotly::ggplotly(p, tooltip = c("x", "y", "color"))
+})
+```
+
+## Column
+
+### "Premio" a la Educación (Superior vs. Básica)
+```{r}
+
+plotly::renderPlotly({
+  # Obtener sexos a filtrar
+  sexos_filtro <- obtener_sexos_filtro(input$sexo_select)
+  
+  df_premio <- datos_filtrados() %>%
+    dplyr::filter( 
+      sexo %in% sexos_filtro, 
+      edad == input$edad_select,
+      nivel_educ %in% c("Básica", "Superior")
+    ) %>%
+    dplyr::group_by(pais, año, nivel_educ) %>% 
+    dplyr::summarise(tasa_empleo = mean(tasa_empleo, na.rm = TRUE), .groups = 'drop') %>% 
+    tidyr::pivot_wider(names_from = nivel_educ, values_from = tasa_empleo) %>% 
+    dplyr::mutate(premio_educativo = Superior - Básica) %>% 
+    dplyr::filter(!is.na(premio_educativo)) 
+
+  # Calculamos el valor máximo de Y para poner el texto arriba del todo
+  max_y <- if(nrow(df_premio) > 0) max(df_premio$premio_educativo, na.rm = TRUE) else 50
+
+  p <- ggplot(df_premio, aes(x = año, y = premio_educativo, color = pais, group = pais)) +
+    geom_line(linewidth = 1.2, alpha = 0.8) +
+    
+    # --- CAMBIO: LÍNEA + ETIQUETA DE TEXTO EXPLICATIVA ---
+    geom_vline(xintercept = 2008, linetype = "dashed", color = "gray50", alpha = 0.7) +
+    annotate("text", x = 2009.5, y = max_y, label = "Crisis 2008", 
+             color = "gray50", size = 3.5, hjust = 2, fontface = "italic") +
+    # -----------------------------------------------------
+
+    scale_color_brewer(palette = "Set2") +
+    labs(
+      title = "Evolución del 'Premio' a la Educación Superior",
+      subtitle = paste("Diferencia (Superior vs. Básica) |", input$sexo_select),
+      x = "Año",
+      y = "Diferencia en Puntos Porcentuales (p.p.)",
+      color = "País"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "none")  
+
+  plotly::ggplotly(p, tooltip = c("x", "y", "color")) 
+})
+```
+
+# Enfoque: España {data-icon="fa-flag"}
+
+## Column {data-width=600}
+
+### Heatmap: Edad, Año y Nivel Educativo en España
+```{r}
+### Heatmap: Edad, Año y Nivel Educativo en España
+plotly::renderPlotly({
+  # Obtener sexos a filtrar
+  sexos_filtro <- obtener_sexos_filtro(input$sexo_select)
+  
+  espana_heatmap_educ <- yth_clean_improved %>%
+    dplyr::filter( 
+      pais == "España",
+      sexo %in% sexos_filtro, 
+      edad %in% c("De 15 a 19 años", "De 20 a 24 años", "De 25 a 29 años"),
+      nivel_educ %in% c("Básica", "Secundaria", "Superior")
+    ) %>%
+    dplyr::mutate( 
+      # CAMBIO 1: Reordenamos para que 'Básica' salga arriba (primero en el factor)
+      nivel_educ = factor(nivel_educ, levels = c("Básica", "Secundaria", "Superior")),
+      edad = factor(edad, levels = c("De 25 a 29 años", "De 20 a 24 años", "De 15 a 19 años"))
+    )
+ 
+  p <- ggplot(espana_heatmap_educ, 
+              aes(x = año, y = edad, fill = tasa_empleo,
+                  text = paste("<b>Año:</b>", año,
+                               "<br><b>Edad:</b>", edad,
+                               "<br><b>Nivel Educ.:</b>", nivel_educ,
+                               "<br><b>Tasa Empleo:</b>", round(tasa_empleo, 1), "%"))) +
+    geom_tile(color = "white", linewidth = 0.2) +
+    
+    # CAMBIO 2: Paleta de colores Amarilla-Naranja-Roja
+    scale_fill_distiller(palette = "YlOrRd", direction = 1, name = "Tasa de Empleo (%)") +
+    
+    facet_wrap(~ nivel_educ, ncol = 1) +
+    
+    # CAMBIO 3: Nuevo Título
+    labs(
+      title = "Tasa de Empleo por Edad y Nivel Educativo en España",
+      subtitle = paste("Datos filtrados por:", input$sexo_select),
+      x = "Año",
+      y = "Grupo de Edad"
+    ) +
+    theme_minimal() +
+    theme(
+      strip.text = element_text(face = "bold", size = 12),
+      panel.spacing = unit(0.5, "lines"), # Reducir espacio entre paneles
+      strip.background = element_rect(fill = "#f0f0f0", color = NA) # Fondo gris en los títulos de los paneles
+    )
+
+  plotly::ggplotly(p, tooltip = "text") 
+})
+
+```
+
+## Column {data-width=400}
+
+### España vs Media Países Seleccionados (Ed. Superior)
+```{r}
+plotly::renderPlotly({
+  # Obtener sexos a filtrar
+  sexos_filtro <- obtener_sexos_filtro(input$sexo_select)
+  
+  espana_vs_media <- datos_filtrados() %>% # Ya filtrado por año y paises
+    dplyr::filter( 
+      nivel_educ == input$educ_select, 
+      edad == input$edad_select,     
+      sexo %in% sexos_filtro 
+    ) %>%
+    dplyr::mutate( 
+      grupo = ifelse(pais == "España", "España", "Media Países Sel.")
+    ) %>%
+    dplyr::group_by(año, grupo) %>% 
+    dplyr::summarise( 
+      tasa_promedio = mean(tasa_empleo, na.rm = TRUE),
+      .groups = 'drop'
+    )
+ 
+  p <- ggplot(espana_vs_media, 
+         aes(x = año, y = tasa_promedio, color = grupo, group = grupo)) +
+    geom_line(linewidth = 1.5) +
+    labs(
+      title = "España vs Media Países Seleccionados",
+      subtitle = paste(input$educ_select, "|", input$edad_select, "|", input$sexo_select), 
+      x = "Año",
+      y = "Tasa de empleo (%)",
+      color = ""
+    ) +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+ 
+  plotly::ggplotly(p, tooltip = c("x", "y", "color")) 
+})
+```
+
+### Impacto Crisis 2008 (España, Ed. Superior)
+```{r}
+### Impacto Crisis 2008 (España, Ed. Superior)
+plotly::renderPlotly({
+  # Obtener sexos a filtrar
+  sexos_filtro <- obtener_sexos_filtro(input$sexo_select)
+  
+  crisis_espana <- yth_clean_improved %>%
+    dplyr::filter(pais == "España", 
+           sexo %in% sexos_filtro, 
+           edad == "De 15 a 29 años",
+           nivel_educ == "Superior",
+           año >= 2005) %>%
+    dplyr::group_by(año) %>% 
+    dplyr::summarise(tasa_empleo = mean(tasa_empleo, na.rm = TRUE)) %>% 
+    dplyr::mutate(año = as.integer(año)) 
+
+  p <- ggplot(crisis_espana, aes(x = año, y = tasa_empleo)) +
+    # Línea principal de datos
+    geom_line(color = "#C41E3A", linewidth = 1.5) +
+    geom_point(color = "#C41E3A", size = 3) +
+    
+    # CAMBIO: Mapeamos el color dentro de aes() para crear la leyenda
+    geom_vline(aes(xintercept = 2008, color = "Inicio Crisis (2008)"), 
+               linetype = "dashed", linewidth = 1) +
+    
+    geom_vline(aes(xintercept = 2013, color = "Inflexión/Recuperación (2013)"), 
+               linetype = "dashed", linewidth = 1) +
+    
+    # CAMBIO: Definimos los colores manualmente y damos título a la leyenda
+    scale_color_manual(
+      values = c(
+        "Inicio Crisis (2008)" = "red", 
+        "Inflexión/Recuperación (2013)" = "orange"
+      )
+    ) +
+    
+    labs(
+      title = "Impacto de la Crisis Económica",
+      subtitle = paste("Ed. Superior | 15-29 años |", input$sexo_select),
+      x = "Año",
+      y = "Tasa de empleo (%)"
+    ) +
+    theme_minimal() +
+    # Movemos la leyenda abajo para que no quite espacio lateral
+    theme(legend.position = "bottom")
+
+  # Renderizamos el gráfico interactivo
+  plotly::ggplotly(p, tooltip = c("x", "y")) %>%
+    plotly::layout(legend = list(orientation = "h", x = 0.1, y = -0.2))
+})
+```
+
+# Enfoque: Canarias {data-icon="fa-sun"}
+
+## Column
+
+### Canarias vs. Media España (\<25 años)
+```{r}
+plotly::renderPlotly({
+  
+  # 1. Calculamos el mínimo de los datos para saber dónde es "abajo"
+  min_y <- min(datos_comparativos_can$tasa_empleo, na.rm = TRUE)
+
+  p <- ggplot(datos_comparativos_can, 
+              aes(x = año, y = tasa_empleo, color = ambito, group = ambito)) +
+    geom_line(linewidth = 1.5, alpha = 0.8) +
+    geom_point(size = 2.5) +
+    
+    # 2. Línea vertical
+    geom_vline(xintercept = 2008, linetype = "dashed", color = "gray50") +
+    
+    # 3. Texto: A la izquierda (2007.5) y abajo (min_y)
+    annotate("text", 
+             x = 2005.7,      # Un poco antes del 2008
+             y = min_y,       # En la parte más baja de los datos
+             label = "Crisis 2008", 
+             color = "gray50", 
+             size = 3.5, 
+             hjust = 1,       # Alineación derecha (para que el texto termine justo antes de la línea)
+             vjust = 0,       # Alineación base
+             fontface = "italic") +
+
+    scale_color_manual(values = c("Canarias (<25 años)" = "#FFC300", "España (15-24 años)" = "#C70039")) +
+    labs(
+      title = "Comparativa: Canarias vs. Media de España",
+      subtitle = "Tasa de Empleo Juvenil (<25 años)",
+      x = "Año",
+      y = "Tasa de Empleo (%)",
+      color = "Ámbito"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+
+  plotly::ggplotly(p, tooltip = c("x", "y", "color")) 
+})
+```
+
+### Canarias
+```{r}
+leaflet::renderLeaflet({
+ 
+  paleta_color <- leaflet::colorNumeric( 
+    palette = c("#28B463", "#F1C40F", "#C0392B"),
+    domain = datos_mapa_canarias$tasa_paro
+  )
+
+  etiquetas_islas <- paste0(
+    "<strong>Isla: </strong>", datos_mapa_canarias$isla, "<br/>",
+    "<strong>Tasa de Paro (<25 años): </strong>", round(datos_mapa_canarias$tasa_paro, 1), "%"
+  ) %>% lapply(htmltools::HTML)
+ 
+  leaflet::leaflet(data = datos_mapa_canarias) %>% 
+    leaflet::addProviderTiles(providers$CartoDB.Positron) %>% 
+    leaflet::addCircles( 
+      lng = ~longitud,
+      lat = ~latitud,
+      radius = ~sqrt(superficie) * 500, 
+      color = ~paleta_color(tasa_paro),
+      weight = 1,
+      stroke = TRUE,
+      fillOpacity = 0.7,
+      label = etiquetas_islas
+    ) %>%
+    leaflet::addLegend( 
+      pal = paleta_color,
+      values = ~tasa_paro,
+      title = "Tasa de Paro<br>(<25 años) %",
+      position = "bottomright"
+    ) %>%
+    leaflet::setView(lng = -15.9, lat = 28.3, zoom = 7) 
+})
+```
+
+## Column
+
+### Evolución por Isla (\<25 años)
+```{r}
+plotly::renderPlotly({
+ 
+  p <- ggplot(islas_anual, 
+              aes(x = año, y = tasa_empleo, group = 1,
+                  text = paste("<b>Isla:</b>", Territorio,
+                               "<br><b>Año:</b>", año,
+                               "<br><b>Tasa Empleo:</b>", round(tasa_empleo, 1), "%"))) +
+    geom_line(color = "#0072B2", linewidth = 1.2) +
+    geom_point(color = "#0072B2", size = 2) +
+    facet_wrap(~ Territorio, ncol = 2) + 
+    labs(
+      title = "Evolución del Empleo Juvenil (<25 años) por Islas",
+      x = "Año",
+      y = "Tasa de Empleo (%)"
+    ) +
+    theme_bw() +
+    theme(strip.text = element_text(face = "bold", size = 10))
+
+  plotly::ggplotly(p, tooltip = "text") 
+})
+```
+
+
+
+# Modelado {data-icon="fa-chart-line"}
+
+## Column {.sidebar data-width=300}
+
+### Controles del Modelo ARIMA
+
+```{r}
+
+# --- FIX VISUAL: Ajustar márgenes superiores ---
+# Esto reduce el espacio en blanco al principio de la barra lateral
+shiny::tags$style(HTML("
+  .section.sidebar {
+    padding-top: 20px !important; /* Originalmente era 40px */
+  }
+  .sidebar h3 {
+    margin-top: 0px !important;
+    padding-top: 10px !important; 
+    margin-bottom: 10px !important;
+  }
+"))
+
+# Agregar espacio arriba del título
+shiny::tags$div(style = "margin-top: 15px;")
+
+shiny::h5("Seleccione la serie de datos y ajuste los parámetros del modelo.") 
+
+shiny::selectInput("modelo_target", "1. Seleccionar Ámbito:", 
+  choices = c("Europa (Anual, Superior)", 
+  "Canarias (Trimestral, Sub-25)"), 
+  selected = "Europa (Anual, Superior)")
+
+shiny::hr() 
+
+shiny::h5("2. Selección de Series y Entrenamiento") 
+
+# --- CONTROLES EUROPA ---
+# Usamos renderUI para que las opciones se actualicen dinámicamente según los datos cargados
+shiny::conditionalPanel( 
+  condition = "input.modelo_target == 'Europa (Anual, Superior)'",
+  
+  # Selector País 1
+  shiny::selectInput("pais_select_1", "Seleccionar País 1:", 
+                     choices = unique(resumen_comparativo$pais), 
+                     selected = "España"),
+  
+  # Selector País 2 (Por defecto seleccionamos el segundo de la lista si existe, sino el primero)
+  shiny::selectInput("pais_select_2", "Seleccionar País 2:", 
+                     choices = unique(resumen_comparativo$pais), 
+                     selected = if(length(unique(resumen_comparativo$pais)) > 1) unique(resumen_comparativo$pais)[2] else "España"),
+
+  # Slider de años
+  shiny::sliderInput("modelo_año_inicio_esp", "Año de inicio (Entrenamiento):", 
+           min = min(resumen_comparativo$año, na.rm=TRUE),
+           max = max(resumen_comparativo$año, na.rm=TRUE) - 5, 
+           value = 2000,
+           step = 1, sep = "")
+)
+
+# --- CONTROLES CANARIAS ---
+shiny::conditionalPanel( 
+  condition = "input.modelo_target == 'Canarias (Trimestral, Sub-25)'", 
+
+  # Selector Isla 1
+  shiny::selectInput("modelo_isla_select_1", "Seleccionar Territorio 1:", 
+    choices = opciones_islas_can, 
+    selected = "Canarias"),
+  
+  # Selector Isla 2
+  shiny::selectInput("modelo_isla_select_2", "Seleccionar Territorio 2:", 
+    choices = opciones_islas_can, 
+    selected = if(length(opciones_islas_can) > 1) opciones_islas_can[2] else "Canarias"),
+
+  shiny::selectInput("modelo_trimestre_inicio_can", "Trimestre de inicio:", 
+    choices = opciones_lista_can,
+    selected = selected_indice_can)
+)
+
+shiny::hr() 
+shiny::h5("3. Parámetros del Modelo (p, d, q)") 
+shiny::p("Estos parámetros se aplicarán a ambas gráficas simultáneamente.", style = "font-size: 0.9em; color: #666;")
+
+shiny::div(style="display: flex; justify-content: space-between;",
+  shiny::div(style="width: 30%;", shiny::selectInput("modelo_p", "p (AR)", choices = 0:2, selected = 1)),
+  shiny::div(style="width: 30%;", shiny::selectInput("modelo_d", "d (Int)", choices = 0:2, selected = 1)),
+  shiny::div(style="width: 30%;", shiny::selectInput("modelo_q", "q (MA)", choices = 0:2, selected = 1))
+)
+
+shiny::hr() 
+
+shiny::h5("4. Horizonte de Predicción") 
+
+shiny::sliderInput("modelo_h", "Períodos a predecir:", 
+           min = 1, max = 20,
+           value = 8, step = 1) 
+
+shiny::hr() 
+shiny::actionButton("modelo_run", "Calcular y Predecir", icon = shiny::icon("cogs"), width = "100%", class = "btn-primary") 
+```
+
+## Column {.tabset}
+
+### Predicciones Comparativas
+
+```{r}
+# --- FUNCIÓN AUXILIAR ROBUSTA ---
+ejecutar_arima_y_graficar <- function(datos_ts, nombre_serie, p_in, d_in, q_in, h_in, color_linea) {
+  
+  # 1. Validación de datos vacíos
+  if (nrow(datos_ts) < 5) {
+    return(plotly::plot_ly() %>% 
+             plotly::layout(title = paste("Datos insuficientes para:", nombre_serie),
+                            xaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE),
+                            yaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE)))
+  }
+
+  # 2. Ajustar Modelo con control de errores
+  modelo_formula <- ARIMA(tasa ~ pdq(p_in, d_in, q_in))
+  
+  modelo_fit <- tryCatch({
+      datos_ts %>% model(ARIMA = modelo_formula) 
+    }, error = function(e) { NULL } 
+  )
+  
+  if (is.null(modelo_fit)) {
+    return(plotly::plot_ly() %>% 
+             plotly::layout(title = paste("El modelo ARIMA falló para:", nombre_serie, "(Verifique parámetros)")))
+  }
+  
+  # 3. Predecir
+  predicciones <- tryCatch({
+    forecast(modelo_fit, h = h_in)
+  }, error = function(e) NULL)
+  
+  if (is.null(predicciones)) return(plotly::plot_ly() %>% plotly::layout(title = "Error en predicción"))
+
+  intervalos <- predicciones %>%
+    hilo(level = c(80, 95)) %>% 
+    unpack_hilo(c(`80%`, `95%`))
+  
+  # 4. Graficar
+  idx_name <- index_var(datos_ts) # Detecta si es 'año' o 'trimestre' automáticamente
+  
+  p <- plotly::plot_ly() %>% 
+    plotly::add_lines(data = datos_ts, x = ~get(idx_name), y = ~tasa, name = "Observación", line = list(color = 'black')) %>% 
+    plotly::add_ribbons(data = intervalos, x = ~get(idx_name), ymin = ~`95%_lower`, ymax = ~`95%_upper`, name = "95% IC", line = list(color = 'rgba(173, 216, 230, 0.0)'), fillcolor = 'rgba(173, 216, 230, 0.4)') %>% 
+    plotly::add_ribbons(data = intervalos, x = ~get(idx_name), ymin = ~`80%_lower`, ymax = ~`80%_upper`, name = "80% IC", line = list(color = 'rgba(100, 149, 237, 0.0)'), fillcolor = 'rgba(100, 149, 237, 0.5)') %>% 
+    plotly::add_lines(data = predicciones, x = ~get(idx_name), y = ~.mean, name = "Predicción", line = list(color = color_linea, width = 2.5, dash = 'dot')) %>% 
+    plotly::layout( 
+      title = list(text = paste0("<b>", nombre_serie, "</b> - ARIMA(", p_in, ",", d_in, ",", q_in, ")"), font = list(size = 14)),
+      xaxis = list(title = ""), # Quitamos título eje X para ahorrar espacio
+      yaxis = list(title = "Tasa (%)"),
+      legend = list(orientation = 'h', x = 0.5, xanchor = 'center', y = -0.15),
+      hovermode = "x unified",
+      margin = list(t = 40, b = 20) # Márgenes ajustados
+    )
+  return(p)
+}
+
+
+# --- REACTIVOS ---
+params_modelo <- shiny::reactive({
+  if (!is.null(input$modelo_run) && input$modelo_run > 0) {
+    list(p = as.numeric(input$modelo_p), d = as.numeric(input$modelo_d), q = as.numeric(input$modelo_q), h = input$modelo_h)
+  } else {
+    list(p=1, d=1, q=1, h=8)
+  }
+})
+
+datos_europa_prep <- shiny::reactive({
+  resumen_comparativo %>%
+    dplyr::filter(nivel_educ == "Superior") %>%
+    dplyr::select(pais, año, tasa = tasa_promedio) %>%
+    dplyr::mutate(año = as.integer(año)) %>%
+    tsibble::as_tsibble(index = año, key = pais)
+})
+
+datos_canarias_prep <- shiny::reactive({
+  canarias_islas_ts %>%
+    dplyr::select(Territorio, trimestre, tasa = tasa_empleo)
+})
+
+# =========================================================
+# OUTPUT GRÁFICA 1
+# =========================================================
+output$plot_arima_1 <- plotly::renderPlotly({
+  pars <- params_modelo()
+  
+  if (input$modelo_target == "Europa (Anual, Superior)") {
+    # Usamos input o defaults seguros
+    pais_sel <- if (!is.null(input$modelo_run) && input$modelo_run > 0) input$pais_select_1 else "España"
+    anio_ini <- if (!is.null(input$modelo_run) && input$modelo_run > 0) input$modelo_año_inicio_esp else 2000
+    
+    # Filtramos
+    datos <- datos_europa_prep() %>% dplyr::filter(pais == pais_sel, año >= anio_ini)
+    ejecutar_arima_y_graficar(datos, pais_sel, pars$p, pars$d, pars$q, pars$h, "#C41E3A")
+    
+  } else {
+    isla_sel <- if (!is.null(input$modelo_run) && input$modelo_run > 0) input$modelo_isla_select_1 else "Canarias"
+    idx_trim <- if (!is.null(input$modelo_run) && input$modelo_run > 0) as.numeric(input$modelo_trimestre_inicio_can) else 1
+    
+    opciones_obj_can_full <- unique(canarias_islas_ts$trimestre)
+    start_t <- opciones_obj_can_full[idx_trim]
+    
+    datos <- datos_canarias_prep() %>% dplyr::filter(Territorio == isla_sel, trimestre >= start_t)
+    ejecutar_arima_y_graficar(datos, isla_sel, pars$p, pars$d, pars$q, pars$h, "#FFC300")
+  }
+})
+
+# =========================================================
+# OUTPUT GRÁFICA 2
+# =========================================================
+output$plot_arima_2 <- plotly::renderPlotly({
+  pars <- params_modelo()
+  
+  if (input$modelo_target == "Europa (Anual, Superior)") {
+    # Validamos que el input exista, si no cogemos el 2º país disponible o España
+    pais_defecto <- if(length(unique(resumen_comparativo$pais)) > 1) unique(resumen_comparativo$pais)[2] else "España"
+    
+    # Check extra: si input$pais_select_2 es NULL (aún no cargó), usar default
+    pais_sel <- if (!is.null(input$pais_select_2)) input$pais_select_2 else pais_defecto
+    
+    # Si se pulsó el botón, confirmamos la selección
+    if (!is.null(input$modelo_run) && input$modelo_run > 0) pais_sel <- input$pais_select_2
+    
+    anio_ini <- if (!is.null(input$modelo_run) && input$modelo_run > 0) input$modelo_año_inicio_esp else 2000
+    
+    datos <- datos_europa_prep() %>% dplyr::filter(pais == pais_sel, año >= anio_ini)
+    ejecutar_arima_y_graficar(datos, pais_sel, pars$p, pars$d, pars$q, pars$h, "#0072B2")
+    
+  } else {
+    # Validamos default isla
+    isla_defecto <- if(length(opciones_islas_can) > 1) opciones_islas_can[2] else "Canarias"
+    isla_sel <- if (!is.null(input$modelo_isla_select_2)) input$modelo_isla_select_2 else isla_defecto
+    
+    if (!is.null(input$modelo_run) && input$modelo_run > 0) isla_sel <- input$modelo_isla_select_2
+    
+    idx_trim <- if (!is.null(input$modelo_run) && input$modelo_run > 0) as.numeric(input$modelo_trimestre_inicio_can) else 1
+    
+    opciones_obj_can_full <- unique(canarias_islas_ts$trimestre)
+    start_t <- opciones_obj_can_full[idx_trim]
+    
+    datos <- datos_canarias_prep() %>% dplyr::filter(Territorio == isla_sel, trimestre >= start_t)
+    ejecutar_arima_y_graficar(datos, isla_sel, pars$p, pars$d, pars$q, pars$h, "#28B463")
+  }
+})
+
+# Renderizar las dos gráficas en contenedores separados para asegurar altura
+shiny::fillCol(height = "100%", flex = c(1, 1), 
+  plotly::plotlyOutput("plot_arima_1", height = "100%"),
+  plotly::plotlyOutput("plot_arima_2", height = "100%")
+)
+```
+
+
+
+# Comparación de Indicadores {data-icon="fa-balance-scale"}
+
+## Column {.sidebar data-width=300}
+
+### Configuración de Comparación
+```{r}
+# Agregar espacio arriba del título
+shiny::tags$div(style = "margin-top: 15px;")
+
+shiny::h4("📊 Selección de Indicadores", style = "color: #0072B2;")
+
+# ============================================================================
+# INDICADOR 1 (EJE X)
+# ============================================================================
+shiny::h5("Indicador 1 (Eje X)")
+
+shiny::selectInput(
+  "comp_indicador_1",
+  label = "Seleccionar Indicador:",
+  choices = c("Básica", "Secundaria General", "Secundaria Vocacional", "Superior"),
+  selected = "Básica"
+)
+
+shiny::selectInput(
+  "comp_transform_1",
+  label = "Transformación:",
+  choices = c(
+    "Ninguna (original)" = "none", 
+    "Raíz cuadrada (√x)" = "sqrt", 
+    "Logaritmo (log)" = "log"
+  ),
+  selected = "none"
+)
+
+shiny::hr(style = "border-top: 2px solid #0072B2;")
+
+# ============================================================================
+# INDICADOR 2 (EJE Y)
+# ============================================================================
+shiny::h5("Indicador 2 (Eje Y)")
+
+shiny::selectInput(
+  "comp_indicador_2",
+  label = "Seleccionar Indicador:",
+  choices = c("Básica", "Secundaria General", "Secundaria Vocacional", "Superior"),
+  selected = "Superior"
+)
+
+shiny::selectInput(
+  "comp_transform_2",
+  label = "Transformación:",
+  choices = c(
+    "Ninguna (original)" = "none",
+    "Raíz cuadrada (√x)" = "sqrt",
+    "Logaritmo (log)" = "log",
+    "Yeo-Johnson (normalización)" = "yeojohnson"
+  ),
+  selected = "yeojohnson"
+)
+
+shiny::hr(style = "border-top: 2px solid #0072B2;")
+
+# ============================================================================
+# OPCIONES ADICIONALES
+# ============================================================================
+shiny::h5("Opciones de Visualización")
+
+shiny::checkboxInput(
+  "comp_mostrar_paises",
+  label = "Mostrar nombres de países en el gráfico",
+  value = FALSE
+)
+
+shiny::checkboxInput(
+  "comp_mostrar_ic",
+  label = "Mostrar intervalo de confianza (95%)",
+  value = TRUE
+)
+
+shiny::hr()
+
+# ============================================================================
+# INFORMACIÓN Y AYUDA
+# ============================================================================
+shiny::h5("ℹ️ Acerca de las Transformaciones", style = "color: #666;")
+
+shiny::helpText(
+  HTML("
+    <b>Ninguna:</b> Datos originales sin transformar<br><br>
+    <b>Raíz cuadrada (√x):</b> Reduce asimetría positiva. 
+    <i>Requiere x ≥ 0</i><br><br>
+    <b>Logaritmo (log):</b> Reduce asimetría fuerte. 
+    <i>Requiere x > 0</i><br><br>
+    <b>Yeo-Johnson:</b> Normalización automática que funciona con cualquier valor. 
+    Calcula el parámetro λ óptimo.
+  ")
+)
+```
+
+## Column
+
+### Gráfico de Dispersión
+```{r}
+# ============================================================================
+# LÓGICA REACTIVA PARA COMPARACIÓN (CORREGIDA: SIN bestNormalize)
+# ============================================================================
+
+# --- 1. FUNCIONES MANUALES YEO-JOHNSON (Sustituto de bestNormalize) ---
+yeojohnson_manual <- function(y, lambda) {
+  out <- numeric(length(y))
+  pos <- y >= 0
+  if (abs(lambda) < 1e-5) {
+    out[pos] <- log(y[pos] + 1)
+  } else {
+    out[pos] <- ((y[pos] + 1)^lambda - 1) / lambda
+  }
+  neg <- !pos
+  if (abs(lambda - 2) < 1e-5) {
+    out[neg] <- -log(-y[neg] + 1)
+  } else {
+    out[neg] <- -((-y[neg] + 1)^(2 - lambda) - 1) / (2 - lambda)
+  }
+  return(out)
+}
+
+estimar_lambda_yj <- function(y) {
+  obj_func <- function(lam) {
+    y_t <- yeojohnson_manual(y, lam)
+    if(length(y_t) > 5000) y_t <- sample(y_t, 5000)
+    shapiro.test(y_t)$statistic
+  }
+  opt <- optimize(obj_func, c(-5, 5), maximum = TRUE)
+  return(opt$maximum)
+}
+# ----------------------------------------------------------------------
+
+# Función auxiliar para aplicar transformaciones
+aplicar_transformacion <- function(x, tipo, nombre_var = "") {
+  x_clean <- x[!is.na(x) & is.finite(x)]
+  
+  if (length(x_clean) == 0) return(list(data = x, lambda = NA, error = "Sin datos válidos"))
+  
+  resultado <- tryCatch({
+    switch(
+      tipo,
+      "none" = list(data = x, lambda = NA, error = NULL),
+      "sqrt" = {
+        if (any(x < 0, na.rm = TRUE)) {
+          list(data = x, lambda = NA, error = "⚠️ Valores negativos detectados")
+        } else {
+          list(data = sqrt(x), lambda = NA, error = NULL)
+        }
+      },
+      "log" = {
+        if (any(x <= 0, na.rm = TRUE)) {
+          list(data = x, lambda = NA, error = "⚠️ Valores ≤ 0 detectados")
+        } else {
+          list(data = log(x), lambda = NA, error = NULL)
+        }
+      },
+      "yeojohnson" = {
+        # --- USO DE LA FUNCIÓN MANUAL ---
+        lambda_opt <- estimar_lambda_yj(x_clean)
+        x_transformed <- x
+        x_transformed[!is.na(x) & is.finite(x)] <- yeojohnson_manual(x_clean, lambda_opt)
+        list(data = x_transformed, lambda = lambda_opt, error = NULL)
+      },
+      list(data = x, lambda = NA, error = NULL)  # default
+    )
+  }, error = function(e) {
+    list(data = x, lambda = NA, error = paste("Error:", e$message))
+  })
+  
+  return(resultado)
+}
+
+# Datos para la comparación (CON TRADUCTOR DE NOMBRES)
+datos_comparacion <- shiny::reactive({
+  df_base <- datos_corte_transversal()
+  
+  shiny::validate(
+    shiny::need(!is.null(df_base), "No hay datos disponibles"),
+    shiny::need(nrow(df_base) > 0, "No hay datos disponibles")
+  )
+  
+  # --- DICCIONARIO DE TRADUCCIÓN ---
+  # Esto conecta TUS menús originales con los NUEVOS nombres de los datos
+  mapa_nombres <- c(
+    "Básica"                = "Educ. Básica",
+    "Secundaria General"    = "Bachillerato",
+    "Secundaria Vocacional" = "FP Media",
+    "Superior"              = "Educ. Superior"
+  )
+  
+  # Traducimos la selección del usuario al nombre real de la columna
+  # Si seleccionas algo que no está en el mapa, intenta usar el nombre tal cual
+  col_x <- if(input$comp_indicador_1 %in% names(mapa_nombres)) mapa_nombres[input$comp_indicador_1] else input$comp_indicador_1
+  col_y <- if(input$comp_indicador_2 %in% names(mapa_nombres)) mapa_nombres[input$comp_indicador_2] else input$comp_indicador_2
+  
+  # --- VERIFICACIÓN DE SEGURIDAD ---
+  if (!col_x %in% names(df_base)) {
+    shiny::validate(shiny::need(FALSE, paste("Error: No encuentro datos para", input$comp_indicador_1)))
+  }
+  if (!col_y %in% names(df_base)) {
+    shiny::validate(shiny::need(FALSE, paste("Error: No encuentro datos para", input$comp_indicador_2)))
+  }
+  
+  # --- RESTO DEL CÓDIGO IGUAL ---
+  x_original <- df_base[[col_x]]
+  y_original <- df_base[[col_y]]
+  
+  x_result <- aplicar_transformacion(x_original, input$comp_transform_1, input$comp_indicador_1)
+  y_result <- aplicar_transformacion(y_original, input$comp_transform_2, input$comp_indicador_2)
+  
+  df_comp <- data.frame(
+    pais = df_base$pais,
+    x_original = x_original,
+    y_original = y_original,
+    x_transformed = x_result$data,
+    y_transformed = y_result$data
+  )
+  
+  df_comp <- df_comp %>%
+    dplyr::filter(
+      !is.na(x_transformed) & !is.na(y_transformed) &
+      is.finite(x_transformed) & is.finite(y_transformed)
+    )
+  
+  list(
+    datos = df_comp,
+    lambda_x = x_result$lambda,
+    lambda_y = y_result$lambda,
+    error_x = x_result$error,
+    error_y = y_result$error
+  )
+})
+
+# Calcular estadísticas de regresión
+estadisticas_regresion <- shiny::reactive({
+  comp_data <- datos_comparacion()
+  df <- comp_data$datos
+  
+  shiny::validate(
+    shiny::need(nrow(df) >= 3, "Se necesitan al menos 3 observaciones")
+  )
+  
+  modelo <- lm(y_transformed ~ x_transformed, data = df)
+  
+  list(
+    slope = coef(modelo)[2],
+    intercept = coef(modelo)[1],
+    correlation = cor(df$x_transformed, df$y_transformed, use = "complete.obs"),
+    r_squared = summary(modelo)$r.squared,
+    rmse = sqrt(mean(residuals(modelo)^2)),
+    lambda_x = comp_data$lambda_x,
+    lambda_y = comp_data$lambda_y,
+    n_obs = nrow(df)
+  )
+})
+
+# ============================================================================
+# GRÁFICO DE DISPERSIÓN (CORREGIDO: SIN GGREPEL)
+# ============================================================================
+
+output$plot_comparacion_indicadores <- plotly::renderPlotly({
+  comp_data <- datos_comparacion()
+  df <- comp_data$datos
+  stats <- estadisticas_regresion()
+  
+  shiny::validate(shiny::need(nrow(df) >= 2, "Datos insuficientes"))
+  
+  # Etiquetas
+  lab_x <- if(input$comp_transform_1=="none") input$comp_indicador_1 else paste0(input$comp_indicador_1, " (Transf.)")
+  lab_y <- if(input$comp_transform_2=="none") input$comp_indicador_2 else paste0(input$comp_indicador_2, " (Transf.)")
+  
+  p <- ggplot(df, aes(x = x_transformed, y = y_transformed)) +
+    geom_point(
+      size = 3.5, alpha = 0.7, color = "#0072B2",
+      aes(text = paste0("<b>", pais, "</b><br>X: ", round(x_transformed,2), "<br>Y: ", round(y_transformed,2)))
+    ) +
+    labs(
+      title = "Comparación de Indicadores",
+      subtitle = paste0("r = ", round(stats$correlation, 3), " | R² = ", round(stats$r_squared, 3)),
+      x = lab_x, y = lab_y
+    ) +
+    theme_minimal() +
+    theme(plot.title = element_text(face = "bold"))
+  
+  if (input$comp_mostrar_ic) {
+    p <- p + geom_smooth(method = "lm", se = TRUE, color = "#E69F00", fill = "#E69F00", alpha = 0.2)
+  } else {
+    p <- p + geom_smooth(method = "lm", se = FALSE, color = "#E69F00")
+  }
+  
+  # --- CORRECCIÓN: Usamos geom_text estándar (permitido) ---
+  if (input$comp_mostrar_paises) {
+    p <- p + geom_text(
+      aes(label = pais),
+      size = 3,
+      vjust = -0.8,       # Texto un poco arriba del punto
+      check_overlap = TRUE # Evita que se monten unos encima de otros
+    )
+  }
+  
+  plotly::ggplotly(p, tooltip = "text")
+})
+
+plotly::plotlyOutput("plot_comparacion_indicadores", height = "600px")
+```
+
+## Column
+
+### Interpretación
+```{r}
+# ============================================================================
+# PANEL DE INTERPRETACIÓN Y GUÍA
+# ============================================================================
+
+output$interpretacion_resultados <- shiny::renderUI({
+  stats <- estadisticas_regresion()
+  
+  # Interpretar correlación
+  r_abs <- abs(stats$correlation)
+  r_interpretacion <- dplyr::case_when(
+    r_abs >= 0.9 ~ "muy fuerte",
+    r_abs >= 0.7 ~ "fuerte",
+    r_abs >= 0.5 ~ "moderada",
+    r_abs >= 0.3 ~ "débil",
+    TRUE ~ "muy débil o nula"
+  )
+  
+  r_direccion <- if (stats$correlation > 0) "positiva" else "negativa"
+  r2_pct <- round(stats$r_squared * 100, 1)
+  
+  # Interpretación de lambda X
+  lambda_x_html <- ""
+  if (!is.na(stats$lambda_x)) {
+    lambda_interp_x <- dplyr::case_when(
+      abs(stats$lambda_x - 1) < 0.1 ~ "casi sin transformación (datos ya normales)",
+      stats$lambda_x > 1 ~ "transformación potencial (amplifica diferencias)",
+      abs(stats$lambda_x) < 0.1 ~ "similar a logaritmo (reduce asimetría)",
+      stats$lambda_x < 0 ~ "transformación inversa (reduce valores extremos)",
+      TRUE ~ "transformación moderada"
+    )
+    lambda_x_html <- paste0("<li><b>Lambda λ₁ = ", round(stats$lambda_x, 4), ":</b> ", lambda_interp_x, "</li>")
+  }
+  
+  # Interpretación de lambda Y
+  lambda_y_html <- ""
+  if (!is.na(stats$lambda_y)) {
+    lambda_interp_y <- dplyr::case_when(
+      abs(stats$lambda_y - 1) < 0.1 ~ "casi sin transformación (datos ya normales)",
+      stats$lambda_y > 1 ~ "transformación potencial (amplifica diferencias)",
+      abs(stats$lambda_y) < 0.1 ~ "similar a logaritmo (reduce asimetría)",
+      stats$lambda_y < 0 ~ "transformación inversa (reduce valores extremos)",
+      TRUE ~ "transformación moderada"
+    )
+    lambda_y_html <- paste0("<li><b>Lambda λ₂ = ", round(stats$lambda_y, 4), ":</b> ", lambda_interp_y, "</li>")
+  }
+  
+  # Sección de lambdas (solo si hay alguno)
+  seccion_lambdas <- ""
+  if (lambda_x_html != "" || lambda_y_html != "") {
+    seccion_lambdas <- paste0(
+      "<h4 style='color: #333; margin-top: 20px;'>🔄 Transformaciones Yeo-Johnson</h4>",
+      "<ul style='line-height: 1.8;'>",
+      lambda_x_html,
+      lambda_y_html,
+      "</ul>"
+    )
+  }
+  
+  # Determinar texto de pendiente
+  pendiente_texto <- if (stats$slope > 0) "aumenta" else "disminuye"
+  
+  # Recomendación según correlación
+  recomendacion_html <- ""
+  if (r_abs < 0.3) {
+    recomendacion_html <- paste0(
+      "<li style='color: #d32f2f;'>⚠️ La correlación es muy débil. ",
+      "Considera probar diferentes transformaciones o verificar si existe una relación no lineal.</li>"
+    )
+  } else if (r_abs < 0.5) {
+    recomendacion_html <- paste0(
+      "<li style='color: #f57c00;'>⚠️ La correlación es débil-moderada. ",
+      "Otras variables podrían tener mayor influencia.</li>"
+    )
+  } else if (r_abs < 0.7) {
+    recomendacion_html <- paste0(
+      "<li style='color: #388e3c;'>✓ La correlación es moderada-fuerte. ",
+      "Existe una relación clara entre ambos indicadores.</li>"
+    )
+  } else {
+    recomendacion_html <- paste0(
+      "<li style='color: #1976d2;'>✓✓ La correlación es muy fuerte. ",
+      "Los indicadores están altamente relacionados.</li>"
+    )
+  }
+  
+  # Construir HTML completo
+  html_completo <- paste0(
+    "<div style='padding: 20px; background-color: #f8f9fa; border-radius: 8px; margin: 20px;'>",
+    "<h3 style='color: #0072B2; margin-top: 0;'>📊 Interpretación de Resultados</h3>",
+    
+    "<h4 style='color: #333; margin-top: 20px;'>🔍 Correlación Lineal</h4>",
+    "<ul style='line-height: 1.8;'>",
+    "<li><b>Correlación (r) = ", round(stats$correlation, 4), ":</b> ",
+    "Relación <b>", r_direccion, "</b> y <b>", r_interpretacion, "</b> ",
+    "entre ", input$comp_indicador_1, " y ", input$comp_indicador_2, ".</li>",
+    "<li><b>R² = ", round(stats$r_squared, 4), " (", r2_pct, "%):</b> ",
+    "El indicador 1 explica el <b>", r2_pct, "%</b> de la variabilidad del indicador 2.</li>",
+    "</ul>",
+    
+    "<h4 style='color: #333; margin-top: 20px;'>📐 Ecuación de Regresión</h4>",
+    "<ul style='line-height: 1.8;'>",
+    "<li><b>y = ", sprintf("%.4f", stats$slope), " × x + ", sprintf("%.4f", stats$intercept), "</b></li>",
+    "<li><b>Pendiente (a) = ", sprintf("%.4f", stats$slope), ":</b> ",
+    "Por cada unidad que aumenta ", input$comp_indicador_1, ", ",
+    input$comp_indicador_2, " ", pendiente_texto, " en ", abs(round(stats$slope, 4)), " unidades.</li>",
+    "<li><b>RMSE = ", round(stats$rmse, 4), ":</b> Error promedio de la predicción.</li>",
+    "</ul>",
+    
+    seccion_lambdas,
+    
+    "<h4 style='color: #333; margin-top: 20px;'>💡 Recomendaciones</h4>",
+    "<ul style='line-height: 1.8;'>",
+    recomendacion_html,
+    "<li>Observa el gráfico de dispersión para identificar posibles outliers.</li>",
+    "<li>Si usaste Yeo-Johnson, compara con otras transformaciones para validar resultados.</li>",
+    "</ul>",
+    "</div>"
+  )
+  
+  HTML(html_completo)
+})
+
+shiny::uiOutput("interpretacion_resultados")
+```
+
+
+# Análisis de Correlación {data-icon="fa-link"}
+
+## Column {.sidebar data-width=300}
+
+### Controles de Correlación
+
+```{r}
+# Agregar espacio arriba del título
+shiny::tags$div(style = "margin-top: 15px;")
+
+# --- CONTROL ÚNICO DE AÑO (CON OPCIÓN DE MEDIA) ---
+# 1. Preparamos las opciones de años
+choices_años <- sort(unique(yth_clean_improved$año), decreasing = TRUE)
+names(choices_años) <- as.character(choices_años)
+# 2. Creamos la lista final de opciones
+choices_finales <- c(
+  "Media de todos los años" = "media", 
+  choices_años
+)
+# 3. Creamos el selectInput con sintaxis simplificada
+div(
+  style = "display: flex; align-items: center; gap: 10px;",
+  tags$label("Corte Temporal:", style = "margin: 0"),
+  selectInput(
+    "analisis_año_individual",
+    label = NULL,
+    choices = choices_finales,
+    selected = "media"
+  )
+)
+
+shiny::hr()
+
+# --- CONTROLES PARA BIPLOT PCA ---
+shiny::h5("Controles de Biplot PCA")
+
+tags$div(
+  style = "display:flex; gap:20px; align-items:center; flex-wrap:wrap;",
+  tags$div(
+    style="display:flex; align-items:center; gap:6px; min-width:200px;",
+    tags$label("Componente eje x", style="margin-bottom:0; white-space:nowrap;"),
+    shiny::numericInput(
+      "PCx",
+      label = NULL,
+      value=1,
+      min=1,
+      max=8,
+      step=1,
+      width = "80px"
+    )
+  ),
+  tags$div(
+    style="display:flex; align-items:center; gap:6px; min-width:200px;",
+    tags$label("Componente eje y", style="margin-bottom:0; white-space:nowrap;"),
+    shiny::numericInput(
+      "PCy",
+      label = NULL,
+      value=2,
+      min=1,
+      max=8, 
+      step=1,
+      width = "80px"
+    )
+  )
+)
+
+shiny::hr()
+
+# --- INFORMACIÓN ADICIONAL ---
+shiny::h5("Información del Análisis")
+shiny::tags$div(
+  style = "padding: 10px; background-color: #f8f9fa; border-radius: 5px; font-size: 12px;",
+  shiny::tags$p(
+    style = "margin: 5px 0;",
+    shiny::tags$b("Variables incluidas:"), " 8 indicadores educativos"
+  ),
+  shiny::tags$p(
+    style = "margin: 5px 0;",
+    shiny::tags$b("Niveles:"), " Básica, Secundaria, Bachillerato, FP, Superior, Total"
+  ),
+  shiny::tags$p(
+    style = "margin: 5px 0;",
+    shiny::tags$b("Variables derivadas:"), " Plus Universitario y Ventaja FP"
+  ),
+  shiny::tags$p(
+    style = "margin: 5px 0;",
+    shiny::tags$b("Método:"), " Análisis de Componentes Principales (PCA)"
+  )
+)
+```
+
+```{r}
+# FUNCIÓN REACTIVE QUE PROCESA LOS DATOS EN FUNCIÓN DEL AÑO SELECCIONADO
+datos_corte_transversal <- shiny::reactive({
+  shiny::req(input$analisis_año_individual, input$sexo_select, input$edad_select) 
+  
+  # --- A. DETECCIÓN DE INPUTS ---
+  sex_target <- switch(input$sexo_select, "Hombres"="Males", "Mujeres"="Females", "Total"="Total", "Males")
+  age_target <- switch(input$edad_select,
+                       "15-19 años" = "From 15 to 19 years",
+                       "15-24 años" = "From 15 to 24 years",
+                       "15-29 años" = "From 15 to 29 years",
+                       "20-24 años" = "From 20 to 24 years",
+                       "20-29 años" = "From 20 to 29 years",
+                       "25-29 años" = "From 25 to 29 years",
+                       "From 15 to 24 years")
+
+  # --- B. PAÍSES ---
+  paises_disponibles <- unique(yth$geo)
+  paises_seleccionados <- if(exists("paises_comparacion")) intersect(paises_comparacion, paises_disponibles) else c()
+  
+  if(length(paises_seleccionados) < 5) {
+     grandes_europa <- c("Spain", "Germany", "France", "Italy", "Portugal", "Austria", "Belgium", "Sweden", "Netherlands", "Poland", "Ireland", "Denmark")
+     paises_filtro <- unique(c(paises_seleccionados, intersect(grandes_europa, paises_disponibles)))
+  } else {
+     paises_filtro <- paises_seleccionados
+  }
+
+  # --- C. FILTRADO ---
+  df_filtrado <- yth %>%
+    dplyr::filter(
+      geo %in% paises_filtro,
+      sex == sex_target | sex == substr(sex_target, 1, 1), 
+      age == age_target,
+      grepl("Perc|PC", unit), 
+      grepl("All ISCED|Less than|ED0-2|Upper secondary|ED3|Tertiary|ED5", isced11)
+    ) %>%
+    dplyr::mutate(
+      isced_code = dplyr::case_when(
+        grepl("All ISCED", isced11) ~ "Total País",
+        grepl("Less than|0-2", isced11) ~ "Educ. Básica",
+        grepl("Upper secondary.*vocational", isced11) ~ "FP Media",
+        grepl("Upper secondary.*general", isced11) ~ "Bachillerato",
+        grepl("Upper secondary", isced11) ~ "Secundaria (Total)",
+        grepl("Tertiary|5-8", isced11) ~ "Educ. Superior",
+        TRUE ~ NA_character_
+      ),
+      year = as.numeric(TIME_PERIOD)
+    ) %>%
+    dplyr::filter(!is.na(isced_code))
+
+  if(nrow(df_filtrado) == 0) return(NULL)
+
+  # --- D. SELECCIÓN ---
+  df_selec <- df_filtrado %>%
+    dplyr::select(geo, year, isced_code, OBS_VALUE) %>% 
+    dplyr::rename(pais = geo, año = year, tasa_empleo = OBS_VALUE)
+
+  # --- E. AGREGACIÓN SEGÚN AÑO O MEDIA ---
+  if (input$analisis_año_individual == "media") {
+    df_agregado <- df_selec %>%
+      dplyr::group_by(pais, isced_code) %>%
+      dplyr::summarise(tasa_empleo = mean(tasa_empleo, na.rm = TRUE), .groups = 'drop')
+  } else {
+    df_agregado <- df_selec %>%
+      dplyr::filter(año == as.numeric(input$analisis_año_individual)) %>%
+      dplyr::group_by(pais, isced_code) %>%
+      dplyr::summarise(tasa_empleo = mean(tasa_empleo, na.rm = TRUE), .groups = 'drop')
+  }
+  
+  # --- F. PIVOT Y CÁLCULO DE VARIABLES DERIVADAS ---
+  df_final <- df_agregado %>%
+    tidyr::pivot_wider(names_from = isced_code, values_from = tasa_empleo) %>%
+    dplyr::mutate(
+      `Plus Universitario` = `Educ. Superior` - `Educ. Básica`,
+      `Ventaja FP` = `FP Media` - `Bachillerato`
+    )
+  
+  return(df_final)
+})
+
+
+# CÁLCULO DE PCA (CON IMPUTACIÓN DE NAs)
+pca <- reactive({
+  df <- datos_corte_transversal()
+  if (is.null(df) || nrow(df) == 0) return(NULL)
+  
+  # Preparar matriz
+  df_matrix <- df %>% 
+    tibble::column_to_rownames("pais")
+  
+  # --- SOLUCIÓN: IMPUTAR NAs (Rellenar con la media de la columna) ---
+  # En lugar de na.omit(), si falta un dato, ponemos la media de esa variable
+  for(i in 1:ncol(df_matrix)){
+    df_matrix[is.na(df_matrix[,i]), i] <- mean(df_matrix[,i], na.rm = TRUE)
+  }
+  
+  # Filtrar filas que sigan siendo problemáticas (si toda la columna es NA)
+  df_matrix <- df_matrix[rowSums(is.na(df_matrix)) == 0, ]
+  
+  if(nrow(df_matrix) < 2 || ncol(df_matrix) < 2) return(NULL)
+  
+  pca_result <- tryCatch({
+    prcomp(df_matrix, scale = TRUE)
+  }, error = function(e) return(NULL))
+  
+  return(pca_result)
+})
+```
+
+## Column {.tabset}
+
+### Atrib. originales
+
+```{r}
+shiny::renderTable({
+  datos_corte_transversal()
+})
+```
+
+### Matriz correl.
+
+```{r}
+output$heatmap_correlacion <- plotly::renderPlotly({
+  df_cor_input <- datos_corte_transversal()
+  
+  if (is.null(df_cor_input) || nrow(df_cor_input) < 2 || ncol(df_cor_input) < 2) {
+    return(plot_ly() %>% layout(title = "No hay suficientes datos para calcular la correlación."))
+  }
+  
+  cor_matrix <- df_cor_input %>%
+    select(-pais) %>%
+    na.omit() %>%
+    cor(use = "pairwise.complete.obs")
+  
+  cor_matrix_round <- round(cor_matrix, 2)
+  
+  subtitulo_texto <- if (input$analisis_año_individual == "media") {
+    "Media de todos los años"
+  } else {
+    paste("Año:", input$analisis_año_individual)
+  }
+  
+  # Crear el heatmap con plotly
+  plot_ly(
+    x = colnames(cor_matrix_round),
+    y = rownames(cor_matrix_round),
+    z = cor_matrix_round,
+    type = "heatmap",
+    colors = colorRamp(c("#C41E3A", "#FFFFFF", "#0072B2")),
+    zmin = -1,
+    zmax = 1,
+    hovertemplate = '<b>%{x}</b><br>vs<br><b>%{y}</b><br>Correlación: <b>%{z}</b><extra></extra>',
+    colorbar = list(
+      title = "Correlación",
+      tickvals = c(-1, -0.5, 0, 0.5, 1),
+      ticktext = c("-1", "-0.5", "0", "0.5", "1"),
+      len = 0.7,
+      thickness = 20,
+      x = 1.02
+    )
+  ) %>%
+    layout(
+      title = list(
+        text = paste0("<b>Matriz de Correlación (entre Niveles Educativos)</b><br>",
+                     "<span style='font-size:14px; color:#666666;'>", subtitulo_texto, "</span>"),
+        x = 0.5,
+        xanchor = "center",
+        font = list(size = 18)
+      ),
+      xaxis = list(
+        title = "",
+        tickangle = -45,
+        tickfont = list(size = 12),
+        side = "bottom"
+      ),
+      yaxis = list(
+        title = "",
+        tickfont = list(size = 12),
+        autorange = "reversed"
+      ),
+      plot_bgcolor = '#ffffff',
+      paper_bgcolor = '#ffffff',
+      margin = list(l = 180, r = 180, t = 120, b = 150),
+      autosize = TRUE,
+      height = 800
+    ) %>%
+    config(
+      displayModeBar = TRUE,
+      displaylogo = FALSE,
+      modeBarButtonsToRemove = c('select2d', 'lasso2d', 'autoScale2d')
+    )
+})
+
+plotly::plotlyOutput("heatmap_correlacion", height = "850px")
+```
+
+### Atrib. estandarizados 
+
+```{r}
+shiny::renderTable({
+  df <- datos_corte_transversal()
+  if (is.null(df)) return(NULL)
+  
+  # Convertir a matriz numérica
+  df_mat <- df %>% 
+    tibble::column_to_rownames(var="pais")
+  
+  # --- IMPUTACIÓN VISUAL ---
+  # Rellenamos NAs con la media para poder estandarizar sin perder países
+  for(i in 1:ncol(df_mat)){
+     media_col <- mean(df_mat[,i], na.rm = TRUE)
+     df_mat[is.na(df_mat[,i]), i] <- media_col
+  }
+
+  # Estandarizar (scale) y devolver formato tabla
+  df_mat %>%
+    scale() %>%
+    tibble::as_tibble(rownames = "pais") %>% # Recuperamos la columna pais
+    dplyr::relocate(pais)
+})
+```
+
+### PCs
+
+```{r}
+shiny::renderTable({
+  pca_result <- pca()
+  if (is.null(pca_result)) return(NULL)
+  
+  pca_result$x %>% 
+    as_tibble() %>% 
+    mutate(pais = rownames(pca_result$x)) %>%
+    relocate(pais)
+})
+```
+
+### Pesos combinación lineal PCs
+
+```{r}
+shiny::renderTable({
+  pca_result <- pca()
+  if (is.null(pca_result)) return(NULL)
+  
+  as_tibble(pca_result$rotation, rownames = "variable")
+})
+```
+
+### Varianza explicada
+
+```{r}
+renderPlotly({
+  pca_result <- pca()
+  if (is.null(pca_result)) {
+    return(plot_ly() %>% layout(title = "No hay datos de PCA disponibles"))
+  }
+  
+  tibble(
+    label = fct_inorder(paste("PC", 1:length(pca_result$sdev))),
+    varPercent = pca_result$sdev^2/sum(pca_result$sdev^2) * 100
+  ) %>%
+    filter(varPercent > 2) %>%  # Filtro del 2%
+    ggplot(aes(x=label, y=varPercent)) +
+      geom_bar(stat = "identity", fill = "#0072B2", alpha = 0.7) +
+      labs(
+        x = "Componentes Principales", 
+        y = "Porcentaje varianza explicada",
+        title = "Varianza Explicada por Componente Principal",
+        subtitle = "Gráfico de Sedimentación (Filtrado: > 2%)"
+      ) +
+      geom_text(
+        aes(label = paste0(round(varPercent, digits = 1), "%")), 
+        size = 3,
+        colour = "blue",
+        nudge_y = 1
+      ) +
+      theme_minimal()
+})
+```
+
+### Visualización PCs
+
+```{r}
+highcharter::renderHighchart({
+  pca_result <- pca()
+  if (is.null(pca_result)) {
+    return(highchart() %>% hc_title(text = "No hay datos de PCA disponibles"))
+  }
+  
+  hchart(pca_result, choices = c(input$PCx, input$PCy))
+})
+```
