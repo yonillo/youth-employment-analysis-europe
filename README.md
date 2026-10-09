@@ -53,4 +53,4 @@ El proyecto está desarrollado íntegramente en **R** v4.x, apoyándose en las s
 Estudiante de Ciencia e Ingeniería de Datos - ULPGC
 
 ---
-*Este trabajo fue realizado para la asignatura de Análisis y Explotación de Datos (AEDV), obteniendo una calificación de 9.0.*
+*Este trabajo fue realizado para la asignatura de Análisis y Exploración de Datos (AEDV), obteniendo una calificación de 9.0.*
